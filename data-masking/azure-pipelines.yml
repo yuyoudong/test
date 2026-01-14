@@ -1,0 +1,235 @@
+pool:
+  name: anyfabric-centos7-x86_64
+
+trigger:
+  branches:
+    include:
+      - main
+      - alpha
+      - feature/*
+      - release/*
+
+variables:
+  - group: varGroup
+  - name: imageName
+  - name: pushImage
+    value: $[or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.SourceBranch'], 'refs/heads/alpha'), startsWith(variables['Build.SourceBranch'], 'refs/heads/Feature-'), startsWith(variables['Build.SourceBranch'], 'refs/heads/Release-'), startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'), startsWith(variables['Build.SourceBranch'], 'refs/heads/bugfix/'), startsWith(variables['Build.SourceBranch'], 'refs/heads/hotfix/'))]
+  - name: artifactName
+    value: gofiles
+  - name: UTArtifactName
+    value: coverageFiles
+  - name: UTReportName
+    value: ut_report.xml
+  - name: LintReportName
+    value: lint_report.xml
+  - name: CoverageReportName
+    value: coverage_report.xml
+  - name: version
+    value: '1.0.0'
+  - name: currentBranchName
+    value: $[lower(variables['Build.SourceBranchName'])]
+  - name: branchNameLower
+    ${{ if startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/') }}:
+      value: feature-$(currentBranchName)
+    ${{ if not(startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')) }}:
+      value: $(currentBranchName)
+  - name: tagVersion
+    ${{ if startsWith(variables['Build.SourceBranch'], 'refs/heads/release/') }}:
+      value: $(branchNameLower)
+    ${{ if not(startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')) }}:
+      value: $(version)-$(branchNameLower)
+  - name: versionBuild
+    ${{ if startsWith(variables['Build.SourceBranch'], 'refs/heads/release/') }}:
+      value: $(Build.BuildNumber)
+    ${{ if not(startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')) }}:
+      value: $(version).$(Build.BuildNumber)
+
+resources:
+  containers:
+    - container: builder
+      endpoint: acr.aishu.cn
+      image: cloudhub/gobuilder:go-1.18.3-lint-1.46.2
+    - container: dotnet
+      endpoint: acr.aishu.cn
+      image: wing-biz/euop/dotnet-runtime:3.1
+
+jobs:
+  - job:
+    displayName: updateBuildNumber
+    steps:
+      - script: |
+          echo '##vso[build.updatebuildnumber]$(Build.SourceBranchName)-$(Build.BuildNumber)'
+          echo $(Build.BuildNumber)
+          echo $(Build.SourceBranch)
+  - job: Code_Check
+    displayName: Code Check
+    container: builder
+    workspace:
+      clean: all
+    steps:
+      - template: go_build_pre.yml
+      - checkout: self
+      - script: |
+          go version
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.47.3
+          go mod tidy
+          touch $(Build.SourcesDirectory)/${{variables.LintReportName}}
+          golangci-lint version
+          golangci-lint run --config .golangci.yml --out-format junit-xml ./... > $(Build.SourcesDirectory)/${{variables.LintReportName}}
+        continueOnError: false
+        displayName: Check Code
+      - script: |
+          set -e
+          cd $(Build.SourcesDirectory)
+          rm -rf covhtml_report; rm -rf coverage_report
+          mkdir $(Build.SourcesDirectory)/covhtml_report; mkdir $(Build.SourcesDirectory)/coverage_report
+          go test -v -coverprofile=$(Build.SourcesDirectory)/coverage_report/cover.out.tmp -coverpkg=./cmd/...,./common/...,./domain/...,./adapter/...,./infrastructure/... ./... | go-junit-report > $(Build.SourcesDirectory)/coverage_report/${{variables.UTReportName}}
+          cat $(Build.SourcesDirectory)/coverage_report/cover.out.tmp | grep -v '_mock.go' > $(Build.SourcesDirectory)/coverage_report/cover.out
+          gocov convert $(Build.SourcesDirectory)/coverage_report/cover.out | gocov-xml > $(Build.SourcesDirectory)/coverage_report/${{variables.CoverageReportName}}
+        displayName: UT and Code Coverage
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: $(Build.SourcesDirectory)
+          contents: |
+            ${{variables.LintReportName}}
+            coverage_report/**
+            infrastructure/repository/db/gen/migration/**
+          targetFolder: $(Build.BinariesDirectory)
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: '$(Build.BinariesDirectory)'
+          ArtifactName:  ${{variables.UTArtifactName}}
+
+  - job: UT_Coverage_Check
+    displayName: Reports and Quality Gates
+    container: dotnet
+    dependsOn: Code_Check
+    steps:
+      - checkout: self
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          artifactName: ${{variables.UTArtifactName}}
+          downloadPath: $(Build.BinariesDirectory)
+      - task: PublishTestResults@2
+        displayName: Publish Lint Report
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: '$(Build.BinariesDirectory)/coverageFiles/${{variables.LintReportName}}'
+          testRunTitle: Lint
+          failTaskOnFailedTests: false
+      - task: BuildQualityChecks@8
+        displayName: Quality Gate Lint
+        inputs:
+          checkWarnings: true
+          warningFailOption: 'fixed'
+          warningThreshold: '1'
+          showStatistics: false
+          evaluateTaskWarnings: false
+          evaluateFileWarnings: true
+          warningFilesFolder: '$(Build.BinariesDirectory)'
+          warningFiles: '**/${{variables.LintReportName}}'
+          warningFileFilters: '/^.+<\/failure><\/testcase>$/'
+          warningFilesArtifact: 'coverageFiles'
+      - task: PublishTestResults@2
+        displayName: Publish UT Report
+        inputs:
+          testResultsFormat: "JUnit"
+          testResultsFiles: '$(Build.BinariesDirectory)/coverageFiles/coverage_report/${{variables.UTReportName}}'
+          testRunTitle: 'UT Result'
+          failTaskOnFailedTests: false
+      - task: BuildQualityChecks@8
+        displayName: Quality Gate UT
+        inputs:
+          checkWarnings: true
+          warningFailOption: 'fixed'
+          warningThreshold: '1'
+          showStatistics: false
+          evaluateTaskWarnings: false
+          evaluateFileWarnings: true
+          warningFilesFolder: '$(Build.BinariesDirectory)'
+          warningFiles: '**/${{variables.UTReportName}}'
+          warningFileFilters: '/^.+<\/failure><\/testcase>$/'
+          warningFilesArtifact: 'coverageFiles'
+      - task: PublishCodeCoverageResults@1
+        displayName: Publish Coverage Report
+        inputs:
+          codeCoverageTool: 'Cobertura'
+          summaryFileLocation: '$(Build.BinariesDirectory)/coverageFiles/coverage_report/${{variables.CoverageReportName}}'
+      - task: BuildQualityChecks@8
+        displayName: Quality Gate Coverage
+        inputs:
+          coverageType: 'lines'
+          coverageFailOption: 'fixed'
+          checkCoverage: true
+          coverageThreshold: '0.0'
+
+  - job: Build
+    displayName: Build
+    container: builder
+    dependsOn:
+      - Code_Check
+      - UT_Coverage_Check
+    workspace:
+      clean: all
+    steps:
+      - template: go_build_pre.yml
+      - checkout: self
+      - script: |
+          set -e
+          cd $(Build.SourcesDirectory)
+          go mod tidy
+          /usr/local/go/bin/go build  -o cc -ldflags '-w -s' -gcflags '-N -l' $(Build.SourcesDirectory)/cmd/server
+        workingDirectory: $(Build.SourcesDirectory)
+        displayName: Compile
+      - task: CopyFiles@2
+        displayName: Copy files to binaries directory
+        inputs:
+          SourceFolder: $(Build.SourcesDirectory)
+          contents: |
+            cc
+            Dockerfile
+            cmd/server/config/**
+            cmd/server/docs/**
+            infrastructure/repository/db/gen/migration/**
+          targetFolder: $(Build.BinariesDirectory)
+      - task: PublishBuildArtifacts@1
+        inputs:
+          pathToPublish: $(Build.BinariesDirectory)
+          artifactName: ${{variables.artifactName}}
+
+  - job: push
+    displayName: Build and push docker images
+    dependsOn: Build
+    steps:
+      - checkout: none
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          artifactName: ${{variables.artifactName}}
+          downloadPath: $(Build.SourcesDirectory)
+      - task: Docker@2
+        displayName: Login docker registry
+        inputs:
+          command: login
+          containerRegistry: $(image.registry)
+      - script: |
+          set -e
+          IMAGE=$(image.registry)/$(image.repository.data-masking):${{variables.versionBuild}}
+          IMAGES=$(image.registry)/$(image.repository.data-masking):${{variables.tagVersion}}
+          echo $IMAGE
+          echo $IMAGES
+          echo "##vso[task.setvariable variable=imageName]$IMAGE"
+          echo "##vso[task.setvariable variable=imageNames]$IMAGES"
+          chmod 755 $(Build.SourcesDirectory)/gofiles/cc
+          docker build -f ./gofiles/Dockerfile -t $IMAGE $(Build.SourcesDirectory)/gofiles
+          docker tag $IMAGE $IMAGES
+        displayName: Build docker image
+      - script: |
+          set -e
+          echo $imageName
+          echo $imageNames
+          docker push $(imageName)
+          docker push $(imageNames)
+          docker rmi $(imageName)
+          docker rmi $(imageNames)
+        condition: and(succeeded(), eq(variables.pushImage, true))
+        displayName: Push docker image and remove local image

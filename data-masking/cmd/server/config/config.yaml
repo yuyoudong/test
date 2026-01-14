@@ -1,0 +1,21 @@
+server:
+  http:
+    addr: 0.0.0.0:8153
+    timeout: 1s
+  grpc:
+    addr: 0.0.0.0:9000
+    timeout: 1s
+log:
+  outputPath: test_log
+  mode: file
+
+config:
+  logPath: /tmp/logs
+
+doc:
+  host: "${DOC_HOST}"
+  version: "1.0"
+
+
+
+

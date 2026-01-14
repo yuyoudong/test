@@ -1,0 +1,88 @@
+basePath: /api/data-masking/v1
+definitions:
+  demo.CreateReqBodyParam:
+    properties:
+      name:
+        description: Demo名称，仅支持中英文、数字、下划线及中划线，前后空格自动去除
+        example: demo_name
+        maxLength: 128
+        minLength: 1
+        type: string
+    required:
+    - name
+    type: object
+  demo.CreateRespParam:
+    properties:
+      id:
+        description: DemoID
+        example: 4a5a3cc0-0169-4d62-9442-62214d8fcd8d
+        type: string
+      name:
+        description: Demo名称
+        example: demo_name
+        maxLength: 128
+        type: string
+    required:
+    - id
+    - name
+    type: object
+  rest.HttpError:
+    properties:
+      cause:
+        type: string
+      code:
+        type: string
+      description:
+        type: string
+      detail: {}
+      solution:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: AnyFabric data masking
+  title: data-masking
+  version: "0.0"
+paths:
+  /demos/{pid}:
+    post:
+      consumes:
+      - application/json
+      description: 创建Demo
+      parameters:
+      - default: 4a5a3cc0-0169-4d62-9442-62214d8fcd8d
+        description: P ID，uuid
+        format: uuid
+        in: path
+        name: pid
+        required: true
+        type: string
+      - description: Demo名称，仅支持中英文、数字、下划线及中划线，前后空格自动去除
+        example: demo_name
+        in: query
+        maxLength: 128
+        minLength: 1
+        name: name
+        required: true
+        type: string
+      - description: 请求参数
+        in: body
+        name: _
+        required: true
+        schema:
+          $ref: '#/definitions/demo.CreateReqBodyParam'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 成功响应参数
+          schema:
+            $ref: '#/definitions/demo.CreateRespParam'
+        "400":
+          description: 失败响应参数
+          schema:
+            $ref: '#/definitions/rest.HttpError'
+      summary: 创建Demo
+      tags:
+      - Demo管理
+swagger: "2.0"

@@ -1,0 +1,219 @@
+trigger:
+  branches:
+    include:
+      - alpha
+      - release/*
+
+variables:
+  - name: branchNameLower
+    value: $[lower(variables['Build.SourceBranchName'])]
+  - name: svcName
+    value: cc
+  - name: svcFullName
+    value: data-masking
+  - name: UTReportName
+    value: ut_report.xml
+  - name: CoverageReportName
+    value: coverage_report.xml
+  - name: LintReportName
+    value: lint_report.xml
+  - name: X86Pool
+    value: anyfabric-centos7-x86_64
+  - name: ARMPool
+    value: anyfabric-centos7-arm
+  - name: ACR
+    value: acr.aishu.cn
+  - name: AcrArm
+    value: acr-arm.aishu.cn
+  - name: HarborPath
+    value: af
+  - name: actualBranch
+    value: $[replace(variables['Build.SourceBranch'], 'refs/heads/', '')]
+  - name: actualBranchLower
+    value: $[lower(variables['actualBranch'])]
+  - name: projectVersion
+    value: 1.0.0
+
+# 定义的container名字不要包含'-'字符
+resources:
+  containers:
+    - container: Builder
+      endpoint: ${{variables.ACR}}
+      image: as/ubuntu.go.build:universal.20230220
+
+    - container: dotnet
+      endpoint: ${{variables.ACR}}
+      image: as/dotnet-runtime:universal
+      options: --privileged
+
+  repositories:
+    - repository: templatesAlias
+      type: git
+      name: ONE-Architecture\Yaml-Templates
+      ref: 'refs/heads/main'
+
+jobs:
+  - job: CheckoutCode
+    displayName: Checkout Code
+    pool:
+      name: ${{variables.X86Pool}}
+    workspace:
+      clean: all
+    steps:
+      - checkout: self
+      - script: |
+          pwd
+          ls -al
+        condition: succeeded()
+        displayName: Checkout Code
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: $(Build.SourcesDirectory)
+          ArtifactName: 'checkoutCode'
+          publishLocation: 'Container'
+        displayName: Publish checkoutCodeArtifact
+      - script: |
+          cd $(Build.BinariesDirectory) && rm -rf ./**
+          cd $(Build.SourcesDirectory) && rm -rf ./**
+        condition: always()
+        displayName: Remove Resource
+
+  - template: CITemplate.yml
+    parameters:
+      hub: ${{variables.ACR}}
+      pool: ${{variables.X86Pool}}
+      isX86: true
+      isARM: false
+
+      checkoutCodeJobName: CheckoutCode
+      checkoutCodeArtifactName: checkoutCode
+
+      compileFileJobName: X86Build
+      compileContainer: Builder
+      compileArtifactName: binaryFileX86
+
+      buildImageJobName: BuildImageOfX86
+      imageRegistry: ${{variables.ACR}}/${{variables.HarborPath}}
+
+  - template: CITemplate.yml
+    parameters:
+      hub: ${{variables.AcrArm}}
+      pool: ${{variables.ARMPool}}
+      isX86: false
+      isARM: true
+
+      checkoutCodeJobName: CheckoutCode
+      checkoutCodeArtifactName: checkoutCode
+
+      compileFileJobName: ARMBuild
+      compileContainer: Builder
+      compileArtifactName: binaryFileARM
+
+      buildImageJobName: BuildImageOfARM
+      imageRegistry: ${{variables.AcrArm}}/${{variables.HarborPath}}
+
+  - job: X86PublishUTReports
+    displayName: X86PublishUTReports
+    dependsOn: X86Build
+    condition: succeeded()
+    pool:
+      name: ${{variables.X86Pool}}
+    container: dotnet
+    workspace:
+      clean: all
+    steps:
+      - checkout: none
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          downloadType: 'single'
+          artifactName: binaryFileX86
+          downloadPath: $(Build.SourcesDirectory)
+        displayName: Download binaryFileX86Artifact
+
+      - task: PublishTestResults@2
+        displayName: Publish Lint Report
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: '$(Build.SourcesDirectory)/binaryFileX86/report/${{variables.LintReportName}}'
+          testRunTitle: 'Lint'
+          failTaskOnFailedTests: false
+      - task: BuildQualityChecks@8
+        displayName: Quality Gate Lint
+        inputs:
+          checkWarnings: true
+          warningFailOption: 'fixed'
+          warningThreshold: '1000'
+          showStatistics: false
+          evaluateTaskWarnings: false
+          evaluateFileWarnings: true
+          warningFilesFolder: '$(Build.SourcesDirectory)/binaryFileX86'
+          warningFiles: '**/${{variables.LintReportName}}'
+          warningFileFilters: '/^.+<\/failure>.*?$/'
+          warningFilesArtifact: 'binaryFileX86'
+
+      #      - task: PublishTestResults@2        # 发布单元测试报告
+      #        displayName: Publish UT Report
+      #        inputs:
+      #          testResultsFormat: 'JUnit'
+      #          testResultsFiles: $(Build.SourcesDirectory)/binaryFileX86/report/$(UTReportName)
+      #          testRunTitle: 'UT'
+      #          failTaskOnFailedTests: true
+      - task: BuildQualityChecks@8        # 设置UT质量卡点
+        displayName: Quality Gate UT
+        inputs:
+          checkWarnings: true
+          warningFailOption: 'fixed'
+          warningThreshold: '1000'
+          showStatistics: false
+          evaluateTaskWarnings: false
+          evaluateFileWarnings: true
+          warningFilesFolder: '$(Build.SourcesDirectory)/binaryFileX86'
+          warningFiles: '**/${{variables.UTReportName}}'
+          warningFileFilters: '/^.+<\/failure>.*?$/'
+          warningFilesArtifact: 'binaryFileX86'
+
+      - task: PublishCodeCoverageResults@1 # 发布代码覆盖率报告
+        displayName: Publish Coverage Report
+        inputs:
+          codeCoverageTool: 'Cobertura'
+          summaryFileLocation: $(Build.SourcesDirectory)/binaryFileX86/report/$(CoverageReportName)
+      - task: BuildQualityChecks@8         # 代码覆盖率质量卡点
+        displayName: Quality Gate Coverage
+        inputs:
+          coverageType: 'lines'
+          coverageFailOption: 'fixed'
+          checkCoverage: true
+          coverageThreshold: '0.0'
+
+      - script: |
+          cd $(Build.BinariesDirectory) && rm -rf ./**
+          cd $(Build.SourcesDirectory) && rm -rf ./**
+        condition: always()
+        displayName: Remove Resource
+
+  #  - template: scan-and-push-image.yml@templatesAlias # 保持一致
+  - template: push-image.yml
+    parameters:
+      arch: amd64 # 可选值 amd64,arm64
+      pool: ${{variables.X86Pool}} # 代理池
+      dependsOnName: BuildImageOfX86 # 构建docker镜像步骤所在job的名称，即getAgentName task所在job的名称，此示例中为BuildImage
+      imageName: $[dependencies.BuildImageOfX86.outputs['getAgentName.svcImage']] # 本地构建完镜像之后的全名
+      registry: ${{variables.ACR}} # 连接到harbor的服务连接名
+      scanTimeout: 11m # trivy扫描的超时设置，默认值为5分钟(5m)
+      templateNo: 1 # 若同一个yaml中多次引用此template，此字段需要以1,2,3...的形式区分开来。为了保证template yml中job id的唯一性
+      hasSecondImage: 1 # 1代表同一个镜像存在第二个不同tag，此参数为可选参数，不填写时默认值为0
+      secondImageName: $[dependencies.BuildImageOfX86.outputs['getAgentName.svcImageTag']] # 此参数为可选参数，hasSecondImage为1时需要填写此字段，为镜像包含第二个tag的全名
+
+  #  - template: scan-and-push-image.yml@templatesAlias # 保持一致
+  - template: push-image.yml
+    parameters:
+      arch: arm64 # 可选值 amd64,arm64
+      pool: ${{variables.ARMPool}} # 代理池
+      dependsOnName: BuildImageOfARM # 构建docker镜像步骤所在job的名称，即getAgentName task所在job的名称，此示例中为BuildImage
+      imageName: $[dependencies.BuildImageOfARM.outputs['getAgentName.svcImage']] # 本地构建完镜像之后的全名
+      registry: ${{variables.AcrArm}} # 连接到harbor的服务连接名
+      scanTimeout: 11m # trivy扫描的超时设置，默认值为5分钟(5m)
+      templateNo: 2 # 若同一个yaml中多次引用此template，此字段需要以1,2,3...的形式区分开来。为了保证template yml中job id的唯一性
+      hasSecondImage: 1 # 1代表同一个镜像存在第二个不同tag，此参数为可选参数，不填写时默认值为0
+      secondImageName: $[dependencies.BuildImageOfARM.outputs['getAgentName.svcImageTag']] # 此参数为可选参数，hasSecondImage为1时需要填写此字段，为镜像包含第二个tag的全名

@@ -1,0 +1,65 @@
+parameters:
+  - name: dependsOnName
+    default: ''
+  - name: pool
+    default: ''
+  - name: registry
+    default: ''
+  - name: imageName
+    default: ''
+  - name: scanTimeout
+    default: ''
+  - name: arch
+    default: ''
+  - name: templateNo
+    default: ''
+  - name: exitCode
+    default: '1'
+  - name: hasSecondImage
+    default: '0'
+  - name: secondImageName
+    default: ''
+
+jobs:
+  - job: scan_and_push_${{parameters.arch}}_template_${{parameters.templateNo}}
+    displayName: 镜像扫描并推送-${{parameters.arch}}_template_${{parameters.templateNo}}
+    dependsOn: ${{parameters.dependsOnName}}
+    variables:
+      BuildAgentName: $[dependencies.${{parameters.dependsOnName}}.outputs['getAgentName.BuildAgentName']]
+      ImageName: ${{parameters.imageName}}
+      HasSecondImage: ${{parameters.hasSecondImage}}
+      SecondImageName: ${{parameters.secondImageName}}
+    pool:
+      name: ${{ parameters.pool }}
+      demands:
+        - Agent.Name -equals $(BuildAgentName)
+    workspace:
+      clean: all
+    steps:
+      - checkout: none
+      - task: Docker@2
+        displayName: Login docker registry
+        inputs:
+          command: login
+          containerRegistry: ${{ parameters.registry }}
+      - script: |
+          set -x
+          docker pull acr.aishu.cn/public/trivy:latest
+          docker tag acr.aishu.cn/public/trivy:latest aquasec/trivy:latest
+          docker run --rm -v /root/.docker:/root/.docker -v /tmp:/tmp -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --server http://trivy.aishu.cn:8080 --exit-code 0 --severity CRITICAL,HIGH --security-checks vuln --timeout ${{ parameters.scanTimeout }}  $(imageName)
+        displayName: Scan Docker Image - Full scan
+      - script: |
+          docker push $(imageName)
+        displayName: Push Docker image
+      - script: |
+          docker push $(secondImageName)
+        displayName: Push Second Docker image
+        condition: and(succeeded(), eq(variables.hasSecondImage, '1'))
+      - script: |
+          docker rmi $(imageName)
+        displayName: Remove Docker image
+        condition: always()
+      - script: |
+          docker rmi $(secondImageName)
+        displayName: Remove Second Docker image
+        condition: and(always(), eq(variables.hasSecondImage, '1'))

@@ -1,0 +1,150 @@
+parameters:
+  - name: hub
+    default:
+  - name: pool
+    default:
+
+  - name: isX86
+    default:
+  - name: isARM
+    default:
+  - name: checkoutCodeJobName
+    default:
+  - name: checkoutCodeArtifactName
+    default:
+
+  - name: compileFileJobName
+    default:
+  - name: compileContainer
+    default:
+  - name: compileArtifactName
+    default:
+
+  - name: buildImageJobName
+    default:
+  - name: imageRegistry
+    default:
+
+jobs:
+  - job: ${{ parameters.compileFileJobName }}
+    displayName: ${{ parameters.compileFileJobName }}
+    dependsOn: ${{ parameters.checkoutCodeJobName }}
+    condition: succeeded()
+    pool:
+      name: ${{ parameters.pool }}
+    container: ${{ parameters.compileContainer }}
+    workspace:
+      clean: all
+    steps:
+      - checkout: self
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          downloadType: 'single'
+          artifactName: ${{ parameters.checkoutCodeArtifactName }}
+          downloadPath: $(Build.SourcesDirectory)
+        displayName: Download checkoutCodeArtifact
+      - task: DownloadSecureFile@1
+        name: sshKey
+        inputs:
+          secureFile: 'ContentBuildSSHkey'
+      - script: |
+          set -ex
+          # 添加SSH KEY
+          cd /root/.ssh && ls -al
+          echo Installing $(sshKey.secureFilePath) to ssh key...
+          chown root:root $(sshKey.secureFilePath)
+          chmod 600 $(sshKey.secureFilePath)
+          cp $(sshKey.secureFilePath) /root/.ssh/id_rsa
+          ssh-keyscan -t rsa devops.aishu.cn>> ~/.ssh/known_hosts
+          # 配置git config
+          git config --global url."ssh://devops.aishu.cn:22/AISHUDevOps/".insteadOf "https://devops.aishu.cn/AISHUDevOps/"
+          echo "machine devops.aishu.cn login dashuai.wang password $(System.AccessToken)" > /root/.netrc
+          cat /root/.netrc
+          export NETRC=/root/.netrc
+          cd $(Build.SourcesDirectory)
+          touch cover.out
+          ls -al
+          # 编译
+          go env -w CGO_ENABLED=1
+          go build -o ./$(svcName) -ldflags '-w -s' -gcflags '-N -l'  $(Build.SourcesDirectory)/cmd/server
+        condition: succeeded()
+        displayName: Generate Binary Files
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: $(Build.SourcesDirectory)
+          contents: |
+            $(svcName)
+            Dockerfile
+            cmd/server/config/**
+            cmd/server/docs/**
+            cmd/server/fonts/**
+          targetFolder: $(Build.BinariesDirectory)
+        condition: succeeded()
+        displayName: Copy Files
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: $(Build.BinariesDirectory)
+          ArtifactName: ${{ parameters.compileArtifactName }}
+          publishLocation: 'Container'
+        condition: succeeded()
+        displayName: Publish compileArtifact
+      - script: |
+          cd $(Build.BinariesDirectory) && rm -rf ./**
+          cd $(Build.SourcesDirectory) && rm -rf ./**
+        condition: always()
+        displayName: Remove Resource
+
+  - job: ${{ parameters.buildImageJobName }}
+    displayName: ${{ parameters.buildImageJobName }}
+    dependsOn: ${{ parameters.compileFileJobName }}
+    condition: succeeded()
+    pool:
+      name: ${{ parameters.pool }}
+    workspace:
+      clean: all
+    steps:
+      - checkout: none
+      - task: DownloadBuildArtifacts@0
+        inputs:
+          buildType: 'current'
+          downloadType: 'single'
+          artifactName: ${{ parameters.compileArtifactName }}
+          downloadPath: $(Build.SourcesDirectory)
+        displayName: Download compileArtifact
+      - bash: |
+          if  [ $(actualBranchLower) == 'release/'$(branchNameLower) ];
+          then
+            echo "##vso[task.setvariable variable=svcImage]${{ parameters.imageRegistry }}/$(svcFullName):$(projectVersion)"
+            echo "##vso[task.setvariable variable=svcImageTag]${{ parameters.imageRegistry }}/$(svcFullName):$(projectVersion).$(Build.BuildNumber)"            
+          else
+            echo "##vso[task.setvariable variable=svcImage]${{ parameters.imageRegistry }}/$(svcFullName):1.0.0-$(branchNameLower)"
+            echo "##vso[task.setvariable variable=svcImageTag]${{ parameters.imageRegistry }}/$(svcFullName):1.0.0-$(branchNameLower).$(Build.BuildNumber)"
+          fi
+      # getAgentName task必须要与构建docker镜像的task位于同一个job下，此task的目的是为了将执行docker镜像构建的代理的名称
+      # 保存到变量BuildAgentName中，进而传递到镜像扫描所在template中。会了确保扫描通过后能在同一个代理上找到需要上传到harbor的docker镜像。
+      - task: Bash@3
+        name: getAgentName # task name保持一致
+        inputs:
+          targetType: 'inline'
+          script: |
+            # $(Agent.Name)是流水线内置变量，此行将运行docker镜像构建的代理名赋值给变量BuildAgentName
+            echo "##vso[task.setvariable variable=BuildAgentName;isOutput=true]$(Agent.Name)"
+
+            echo "##vso[task.setvariable variable=svcImage;isOutput=true]$(svcImage)"
+            echo "##vso[task.setvariable variable=svcImageTag;isOutput=true]$(svcImageTag)"
+
+      - script: |
+          set -ex
+          cd ${{ parameters.compileArtifactName }} && ls -al
+          chmod 757 ./$(svcName)
+          docker build --pull --no-cache -t $(svcImage) .
+          docker tag $(svcImage) $(svcImageTag)
+
+        condition: succeeded()
+        displayName: ${{ parameters.buildImageJobName }}
+      - script: |
+          cd $(Build.BinariesDirectory) && rm -rf ./**
+          cd $(Build.SourcesDirectory) && rm -rf ./**
+        condition: always()
+        displayName: Remove Resource
